@@ -15,8 +15,15 @@
     <button id="rtc" onClick="startRtc()">Connect</button>
     <button id="cam" onClick="startCam()" disabled>Cam</button>
     <button id="mic" onClick="startMic()" disabled>Mic</button>
+    <div>
+        <button id="rid_l" onClick="changeRid('l')">Low</button>
+        <button id="rid_m" onClick="changeRid('m')">Medium</button>
+        <button id="rid_h" onClick="changeRid('h')">High</button>
+    </div>
     ICE: <span id="ice_status">new</span>
     <div id="chan_status">Waiting for data channel.</div>
+    <div id="rid_status">Simulcast RID: default</div>
+    <div id="mute_status" hidden style="color: red;">Muted</div>
     <div id="media"></div>
     <script>
         let streamCam;
@@ -62,12 +69,19 @@
             rtc.setLocalDescription(answer);
             await dataChannel.send(JSON.stringify(answer));
         }
+        async function changeRid(rid) {
+            console.log("Changing RID to", rid);
+            await dataChannel.send(JSON.stringify({
+                rid: rid
+            }));
+            byId('rid_status').innerText = `Simulcast RID: ${rid}`;
+        }
         async function startCam() {
             byId('cam').disabled = true;
             streamCam = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    width: 640,
-                    height: 360,
+                    width: 1280,
+                    height: 720,
                 },
             });
             const tr = rtc.addTransceiver(streamCam.getTracks()[0], {
@@ -91,10 +105,25 @@
 
                 // Uncomment this to enable simulcast. The actual selected
                 // simulcast level is hardcoded in chat.rs.
-                // sendEncodings: [
-                //     { rid: "h", maxBitrate: 700 * 1024 },
-                //     { rid: "l", maxBitrate: 150 * 1024 }
-                // ]
+                sendEncodings: [
+                    {
+                        rid: "l",
+                        scaleResolutionDownBy: 4,
+                        maxBitrate: 100_000, // 100kbps
+                        maxFramerate: 15,
+                    },
+                    {
+                        rid: "m",
+                        scaleResolutionDownBy: 2,
+                        maxBitrate: 225_000, // 225kbps
+                        maxFramerate: 20,
+                    },
+                    {
+                        rid: "h",
+                        maxBitrate: 1_500_000, // 1.5Mbps
+                        maxFramerate: 30,
+                    },
+                ]
             });
             await negotiate();
         }
@@ -119,7 +148,7 @@
                 return;
             }
             el.id = domId;
-            el.width = 500;
+            // el.width = 500;
             byId('media').appendChild(el);
             el.controls = true;
             el.autoplay = true;
@@ -129,12 +158,14 @@
                 el.srcObject = media;
             }, 1);
             track.addEventListener('mute', () => {
-                console.log('track muted', track);
-                el.parentNode.removeChild(el);
+                console.warn('track muted', track);
+                // el.parentNode.removeChild(el);
+                byId('mute_status').hidden = false;
             });
             track.addEventListener('unmute', () => {
-                console.log('track unmuted', track);
-                byId('media').appendChild(el);
+                console.warn('track unmuted', track);
+                // byId('media').appendChild(el);
+                byId('mute_status').hidden = true;
             });
         };
         async function startRtc() {

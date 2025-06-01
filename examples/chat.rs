@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use rouille::Server;
 use rouille::{Request, Response};
+use serde::{Deserialize, Serialize};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelData, ChannelId};
 use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
@@ -21,6 +22,11 @@ use str0m::net::Protocol;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
 
 mod util;
+
+#[derive(Deserialize, Serialize, Debug)]
+struct ChangeRid {
+    rid: String,
+}
 
 fn init_log() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -327,7 +333,7 @@ impl Client {
             cid: None,
             tracks_in: vec![],
             tracks_out: vec![],
-            chosen_rid: None,
+            chosen_rid: Some("h".into()),
         }
     }
 
@@ -460,7 +466,9 @@ impl Client {
             return;
         }
 
-        _ = writer.request_keyframe(rid, kind);
+        let keyframe_result = writer.request_keyframe(rid, kind);
+
+        info!("Keyframe result: {:?}", keyframe_result);
 
         track_entry.last_keyframe_request = Some(Instant::now());
     }
@@ -532,9 +540,38 @@ impl Client {
             self.handle_offer(offer);
         } else if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&d.data) {
             self.handle_answer(answer);
+        } else if let Ok(change_rid) = serde_json::from_slice::<'_, ChangeRid>(&d.data) {
+            return self.handle_change_rid(change_rid);
+        } else {
+            warn!(
+                "Client ({}) received unknown channel data: {:?}",
+                *self.id, d.data
+            );
         }
 
         Propagated::Noop
+    }
+
+    fn handle_change_rid(&mut self, change: ChangeRid) -> Propagated {
+        // This is where we plug in a selection strategy for simulcast.
+        // For now we just accept the rid change.
+        self.chosen_rid = Some(change.rid.as_str().into());
+        info!(
+            "Client ({}) changed chosen rid to {:?}",
+            *self.id, change.rid
+        );
+
+        // Since handling loops would take more re-work, send the keyframe request to the first outgoing track
+        if let Some(track_out) = self.tracks_out.first() {
+            self.handle_incoming_keyframe_req(KeyframeRequest {
+                mid: track_out.mid().unwrap(),
+                rid: self.chosen_rid,
+                kind: KeyframeRequestKind::Fir,
+            })
+        } else {
+            warn!("No outgoing tracks to send keyframe request to");
+            Propagated::Noop
+        }
     }
 
     fn handle_offer(&mut self, offer: SdpOffer) {
@@ -602,7 +639,7 @@ impl Client {
             return;
         };
 
-        if data.rid.is_some() && data.rid != Some("h".into()) {
+        if data.rid.is_some() && self.chosen_rid.is_some() && data.rid != self.chosen_rid {
             // This is where we plug in a selection strategy for simulcast. For
             // now either let rid=None through (which would be no simulcast layers)
             // or "h" if we have simulcast (see commented out code in chat.html).
@@ -610,9 +647,9 @@ impl Client {
         }
 
         // Remember this value for keyframe requests.
-        if self.chosen_rid != data.rid {
-            self.chosen_rid = data.rid;
-        }
+        // if self.chosen_rid != data.rid {
+        //     self.chosen_rid = data.rid;
+        // }
 
         let Some(writer) = self.rtc.writer(mid) else {
             return;
