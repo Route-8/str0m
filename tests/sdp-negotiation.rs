@@ -180,6 +180,90 @@ pub fn answer_no_match() {
 }
 
 #[test]
+pub fn max_bundle_port_zero_not_disabled() {
+    init_log();
+    init_crypto_default();
+
+    // Create an SDP offer that uses max-bundle:
+    // - Video on port 9 (primary bundle transport)
+    // - Audio on port 0 (bundled, NOT rejected)
+    // - Both mids (0, 1) are in the BUNDLE group
+    let sdp = "\
+v=0\r\n\
+o=- 123456 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+a=msid-semantic: WMS\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=rtcp:9 IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:test\r\n\
+a=ice-pwd:test\r\n\
+a=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\n\
+a=setup:actpass\r\n\
+a=mid:0\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+m=audio 0 UDP/TLS/RTP/SAVPF 111\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=rtcp:9 IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:test\r\n\
+a=ice-pwd:test\r\n\
+a=bundle-only\r\n\
+a=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\n\
+a=setup:actpass\r\n\
+a=mid:1\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+";
+
+    let offer = SdpOffer::from_sdp_string(sdp).expect("Should parse max-bundle SDP");
+    let mut rtc = TestRtc::new_with_rtc(info_span!("R"), Rtc::builder().build());
+
+    // Accept the offer
+    let _answer = rtc
+        .span
+        .in_scope(|| rtc.rtc.sdp_api().accept_offer(offer))
+        .expect("Should accept max-bundle offer");
+
+    // Get the mids - should have both video (mid 0) and audio (mid 1)
+    let mids = rtc._mids();
+    assert_eq!(mids.len(), 2, "Should have two media lines");
+
+    // Find video and audio mids
+    let video_mid = mids[0];
+    let audio_mid = mids[1];
+
+    let video_media = rtc.media(video_mid).expect("Should have video media");
+    let audio_media = rtc.media(audio_mid).expect("Should have audio media");
+
+    // The key assertion: audio m-line with port 0 should NOT be disabled
+    // because it's in the BUNDLE group, not rejected
+    assert!(
+        !audio_media.remote_pts().is_empty(),
+        "Audio m-line with port 0 in BUNDLE should have remote PTs (not disabled). \
+         Max-bundle port 0 is different from rejected port 0. Got remote_pts: {:?}",
+        audio_media.remote_pts()
+    );
+
+    // Audio should be active
+    assert_ne!(
+        audio_media.direction(),
+        Direction::Inactive,
+        "Audio m-line with port 0 in BUNDLE should NOT be Inactive"
+    );
+
+    // Video should also be active
+    assert!(
+        !video_media.remote_pts().is_empty(),
+        "Video m-line should have remote PTs"
+    );
+}
+
+#[test]
 pub fn answer_different_pt_to_offer() {
     init_log();
     init_crypto_default();
