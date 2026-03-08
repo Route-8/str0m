@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::num::{NonZeroU16, NonZeroU32};
 
 use crate::sdp::FormatParam;
 
@@ -21,6 +22,26 @@ pub struct FormatParams {
     /// Specifies that the decoder prefers DTX (Discontinuous Transmission) such that
     /// the packet rate is greatly lowered during periods of silence.
     pub use_dtx: Option<bool>,
+
+    /// Opus: receiver prefers stereo (RFC 7587 Section 6.1).
+    pub stereo: Option<bool>,
+
+    /// Opus: sender likely produces stereo (RFC 7587 Section 6.1).
+    pub sprop_stereo: Option<bool>,
+
+    /// Opus: max output sampling rate receiver can render, Hz (RFC 7587 Section 6.1).
+    /// Range: 8000–48000.
+    pub max_playback_rate: Option<NonZeroU16>,
+
+    /// Opus: max input sampling rate sender will likely use, Hz (RFC 7587 Section 6.1).
+    /// Range: 8000–48000.
+    pub sprop_max_capture_rate: Option<NonZeroU16>,
+
+    /// Opus: max average receive bitrate, bps (RFC 7587 Section 6.1).
+    pub max_average_bitrate: Option<NonZeroU32>,
+
+    /// Opus: receiver prefers CBR (RFC 7587 Section 6.1).
+    pub cbr: Option<bool>,
 
     /// Whether h264 sending media encoded at a different level in the offerer-to-answerer
     /// direction than the level in the answerer-to-offerer direction, is allowed.
@@ -109,6 +130,12 @@ impl FormatParams {
             Profile(v) => self.profile = Some(*v),
             LevelIdx(v) => self.level_idx = Some(*v),
             Tier(v) => self.tier = Some(*v),
+            Stereo(v) => self.stereo = Some(*v),
+            SpropStereo(v) => self.sprop_stereo = Some(*v),
+            MaxPlaybackRate(v) => self.max_playback_rate = NonZeroU16::new(*v),
+            SpropMaxCaptureRate(v) => self.sprop_max_capture_rate = NonZeroU16::new(*v),
+            MaxAverageBitrate(v) => self.max_average_bitrate = NonZeroU32::new(*v),
+            Cbr(v) => self.cbr = Some(*v),
             Apt(_) => {}
             Unknown => {}
         }
@@ -126,6 +153,24 @@ impl FormatParams {
         }
         if let Some(v) = self.use_dtx {
             r.push(UseDtx(v));
+        }
+        if let Some(v) = self.stereo {
+            r.push(Stereo(v));
+        }
+        if let Some(v) = self.sprop_stereo {
+            r.push(SpropStereo(v));
+        }
+        if let Some(v) = self.max_playback_rate {
+            r.push(MaxPlaybackRate(v.get()));
+        }
+        if let Some(v) = self.sprop_max_capture_rate {
+            r.push(SpropMaxCaptureRate(v.get()));
+        }
+        if let Some(v) = self.max_average_bitrate {
+            r.push(MaxAverageBitrate(v.get()));
+        }
+        if let Some(v) = self.cbr {
+            r.push(Cbr(v));
         }
         if let Some(v) = self.level_asymmetry_allowed {
             r.push(LevelAsymmetryAllowed(v));
