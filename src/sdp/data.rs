@@ -925,6 +925,26 @@ pub enum FormatParam {
     /// out-of-order NAL unit decoding. Valid range: 0–32767.
     SpropMaxDonDiff(u16),
 
+    /// Opus: receiver prefers stereo (RFC 7587). 0=mono (default), 1=stereo.
+    Stereo(bool),
+
+    /// Opus: sender likely produces stereo (RFC 7587).
+    SpropStereo(bool),
+
+    /// Opus: max output sampling rate receiver can render, Hz (RFC 7587). Default: 48000.
+    /// Range: 8000–48000.
+    MaxPlaybackRate(u16),
+
+    /// Opus: max input sampling rate sender will likely use, Hz (RFC 7587). Default: 48000.
+    /// Range: 8000–48000.
+    SpropMaxCaptureRate(u16),
+
+    /// Opus: max average receive bitrate, bps (RFC 7587).
+    MaxAverageBitrate(u32),
+
+    /// Opus: receiver prefers CBR (RFC 7587). Default: 0 (VBR).
+    Cbr(bool),
+
     /// RTX (resend) codecs, which PT it concerns.
     Apt(Pt),
 
@@ -954,6 +974,12 @@ impl FormatParam {
                 .ok()
                 .filter(|&v| v <= 32767)
                 .map(SpropMaxDonDiff),
+            "stereo" => Some(Stereo(v == "1")),
+            "sprop-stereo" => Some(SpropStereo(v == "1")),
+            "maxplaybackrate" => v.parse().map(MaxPlaybackRate).ok(),
+            "sprop-maxcapturerate" => v.parse().map(SpropMaxCaptureRate).ok(),
+            "maxaveragebitrate" => v.parse().map(MaxAverageBitrate).ok(),
+            "cbr" => Some(Cbr(v == "1")),
             "apt" => v.parse::<u8>().map(|v| Apt(Pt::from(v))).ok(),
             _ => None,
         }
@@ -1024,6 +1050,12 @@ impl fmt::Display for FormatParam {
                 )
             }
             SpropMaxDonDiff(v) => write!(f, "sprop-max-don-diff={}", *v),
+            Stereo(v) => write!(f, "stereo={}", i32::from(*v)),
+            SpropStereo(v) => write!(f, "sprop-stereo={}", i32::from(*v)),
+            MaxPlaybackRate(v) => write!(f, "maxplaybackrate={v}"),
+            SpropMaxCaptureRate(v) => write!(f, "sprop-maxcapturerate={v}"),
+            MaxAverageBitrate(v) => write!(f, "maxaveragebitrate={v}"),
+            Cbr(v) => write!(f, "cbr={}", i32::from(*v)),
             Apt(v) => write!(f, "apt={v}"),
             Unknown => Ok(()),
         }
@@ -1491,6 +1523,42 @@ mod test {
                 ..Default::default()
             };
             assert_eq!(f.to_string(), "minptime=10;useinbandfec=1");
+        }
+        #[test]
+        fn fmtp_opus_stereo_round_trip() {
+            use std::num::{NonZeroU16, NonZeroU32};
+            let f = FormatParams {
+                min_p_time: Some(10),
+                use_inband_fec: Some(true),
+                stereo: Some(true),
+                sprop_stereo: Some(true),
+                max_playback_rate: NonZeroU16::new(48000),
+                sprop_max_capture_rate: NonZeroU16::new(48000),
+                max_average_bitrate: NonZeroU32::new(64000),
+                cbr: Some(false),
+                ..Default::default()
+            };
+            let s = f.to_string();
+            assert!(s.contains("stereo=1"));
+            assert!(s.contains("sprop-stereo=1"));
+            assert!(s.contains("maxplaybackrate=48000"));
+            assert!(s.contains("sprop-maxcapturerate=48000"));
+            assert!(s.contains("maxaveragebitrate=64000"));
+            assert!(s.contains("cbr=0"));
+
+            // Round-trip
+            let parsed = FormatParams::parse_line(&s);
+            assert_eq!(f, parsed);
+        }
+
+        #[test]
+        fn fmtp_parse_opus_params() {
+            use std::num::NonZeroU16;
+            let parsed =
+                FormatParams::parse_line("maxplaybackrate=48000;stereo=1;useinbandfec=1");
+            assert_eq!(parsed.max_playback_rate, NonZeroU16::new(48000));
+            assert_eq!(parsed.stereo, Some(true));
+            assert_eq!(parsed.use_inband_fec, Some(true));
         }
     }
 

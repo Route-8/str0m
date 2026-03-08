@@ -2064,3 +2064,29 @@ pub mod unversioned {
         Vp8Depacketizer, Vp8Packetizer,
     };
 }
+
+#[cfg(test)]
+mod size_debug {
+    use super::*;
+    #[test]
+    fn print_variant_sizes() {
+        use std::mem::size_of;
+        println!("FormatParams: {}", size_of::<crate::format::FormatParams>());
+        println!("MediaAdded: {}", size_of::<MediaAdded>());
+        println!("MediaData: {}", size_of::<MediaData>());
+        println!("MediaChanged: {}", size_of::<MediaChanged>());
+        println!(
+            "MediaIngressStats: {}",
+            size_of::<crate::stats::MediaIngressStats>()
+        );
+        println!(
+            "MediaEgressStats: {}",
+            size_of::<crate::stats::MediaEgressStats>()
+        );
+        println!("RtpPacket: {}", size_of::<crate::rtp::RtpPacket>());
+        println!("ChannelData: {}", size_of::<crate::channel::ChannelData>());
+        println!("PeerStats: {}", size_of::<crate::stats::PeerStats>());
+        println!("BweKind: {}", size_of::<BweKind>());
+        println!("Event: {}", size_of::<Event>());
+    }
+}
