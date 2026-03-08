@@ -6,6 +6,7 @@ use crate::config::DtlsCert;
 use crate::crypto::CryptoProvider;
 use crate::crypto::dtls::DtlsVersion;
 use crate::format::CodecConfig;
+use crate::format::FormatParams;
 use crate::format::Vp9PacketizerMode;
 use crate::ice::IceCreds;
 use crate::rtp_::{Bitrate, Extension, ExtensionMap};
@@ -219,6 +220,15 @@ impl RtcConfig {
     /// Enabled by default.
     pub fn enable_opus(mut self, enabled: bool) -> Self {
         self.codec_config.enable_opus(enabled);
+        self
+    }
+
+    /// Configure Opus with custom format parameters (RFC 7587).
+    ///
+    /// Replaces the default Opus configuration. Use this to enable
+    /// stereo support or set other Opus-specific parameters.
+    pub fn set_opus_format(mut self, format: FormatParams) -> Self {
+        self.codec_config.set_opus_format(format);
         self
     }
 

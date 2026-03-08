@@ -223,6 +223,36 @@ impl CodecConfig {
         )
     }
 
+    /// Replace the default Opus configuration with custom format parameters.
+    ///
+    /// Removes any existing Opus entries and adds one with the default PT
+    /// and the given format params. Fields left as `None` in `format`
+    /// fall back to Opus defaults (`minptime=10`, `useinbandfec=1`).
+    pub fn set_opus_format(&mut self, format: FormatParams) {
+        self.params.retain(|c| c.spec.codec != Codec::Opus);
+        self.add_opus(PT_OPUS, format);
+    }
+
+    /// Convenience for adding an Opus payload type with custom format parameters.
+    ///
+    /// Fields left as `None` in `format` fall back to Opus defaults
+    /// (`minptime=10`, `useinbandfec=1`).
+    pub fn add_opus(&mut self, pt: Pt, format: FormatParams) {
+        let merged = FormatParams {
+            min_p_time: format.min_p_time.or(Some(10)),
+            use_inband_fec: format.use_inband_fec.or(Some(true)),
+            ..format
+        };
+        self.add_config(
+            pt,
+            None,
+            Codec::Opus,
+            Frequency::FORTY_EIGHT_KHZ,
+            Some(2),
+            merged,
+        );
+    }
+
     /// Add a default VP8 payload type.
     pub fn enable_vp8(&mut self, enabled: bool) {
         self.params.retain(|c| c.spec.codec != Codec::Vp8);
@@ -1098,5 +1128,67 @@ mod test {
             "Default H.265 profile should be Main (1)"
         );
         assert_eq!(ptl.tier_flag(), 0, "Default H.265 tier should be Main (0)");
+    }
+
+    // ── add_opus ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_add_opus_merges_defaults() {
+        let mut config = CodecConfig::empty();
+        config.add_opus(
+            PT_OPUS,
+            FormatParams {
+                sprop_stereo: Some(true),
+                ..Default::default()
+            },
+        );
+
+        let opus = config
+            .params
+            .iter()
+            .find(|p| p.spec.codec == Codec::Opus)
+            .expect("Opus entry should exist");
+
+        assert_eq!(opus.spec.format.min_p_time, Some(10), "default minptime");
+        assert_eq!(
+            opus.spec.format.use_inband_fec,
+            Some(true),
+            "default useinbandfec"
+        );
+        assert_eq!(
+            opus.spec.format.sprop_stereo,
+            Some(true),
+            "custom sprop-stereo preserved"
+        );
+    }
+
+    #[test]
+    fn test_add_opus_explicit_override() {
+        let mut config = CodecConfig::empty();
+        config.add_opus(
+            PT_OPUS,
+            FormatParams {
+                min_p_time: Some(20),
+                use_inband_fec: Some(false),
+                ..Default::default()
+            },
+        );
+
+        let opus = config
+            .params
+            .iter()
+            .find(|p| p.spec.codec == Codec::Opus)
+            .expect("Opus entry should exist");
+
+        assert_eq!(
+            opus.spec.format.min_p_time,
+            Some(20),
+            "explicit minptime overrides default"
+        );
+        assert_eq!(
+            opus.spec.format.use_inband_fec,
+            Some(false),
+            "explicit useinbandfec overrides default"
+        );
     }
 }

@@ -561,6 +561,19 @@ impl PayloadParams {
             }
         }
 
+        // Adopt Opus stereo/rate params from the remote offer (RFC 7587 §6.1).
+        // When the remote declares it will send stereo (sprop-stereo=1),
+        // respond that we want to receive stereo (stereo=1).
+        // Similarly mirror sprop-maxcapturerate → maxplaybackrate.
+        if self.spec.codec == Codec::Opus && first.spec.codec == Codec::Opus {
+            if let Some(true) = first.spec.format.sprop_stereo {
+                self.spec.format.stereo = Some(true);
+            }
+            if let Some(rate) = first.spec.format.sprop_max_capture_rate {
+                self.spec.format.max_playback_rate = Some(rate);
+            }
+        }
+
         let mut remote_pt = first.pt;
         let mut remote_rtx = first.resend;
 
@@ -1266,6 +1279,89 @@ mod test {
                 local_params.spec.format.sprop_max_don_diff,
                 Some(16),
                 "Local sprop-max-don-diff should be preserved when remote doesn't specify it"
+            );
+        }
+    }
+
+    mod opus {
+        use std::num::NonZeroU16;
+
+        use super::*;
+
+        fn opus_codec_spec(format: FormatParams) -> CodecSpec {
+            CodecSpec {
+                codec: Codec::Opus,
+                clock_rate: Frequency::FORTY_EIGHT_KHZ,
+                channels: Some(2),
+                format,
+            }
+        }
+
+        #[test]
+        fn test_opus_stereo_negotiation() {
+            // Local has default Opus params
+            let local_spec = opus_codec_spec(FormatParams {
+                min_p_time: Some(10),
+                use_inband_fec: Some(true),
+                ..Default::default()
+            });
+            let mut local_params =
+                PayloadParams::new(Pt::new_with_value(111), None, local_spec);
+
+            // Remote offers sprop-stereo=1 and sprop-maxcapturerate=24000
+            let remote_spec = opus_codec_spec(FormatParams {
+                sprop_stereo: Some(true),
+                sprop_max_capture_rate: NonZeroU16::new(24000),
+                ..Default::default()
+            });
+            let remote_params =
+                PayloadParams::new(Pt::new_with_value(111), None, remote_spec);
+
+            let mut claimed = [false; 128];
+            let mut unlocked = std::collections::HashSet::new();
+            local_params.update_param(&[remote_params], &mut claimed, false, &mut unlocked);
+
+            assert_eq!(
+                local_params.spec.format.stereo,
+                Some(true),
+                "stereo should be set when remote offers sprop-stereo=1"
+            );
+            assert_eq!(
+                local_params.spec.format.max_playback_rate,
+                NonZeroU16::new(24000),
+                "maxplaybackrate should mirror sprop-maxcapturerate"
+            );
+            // Existing defaults should be preserved
+            assert_eq!(local_params.spec.format.min_p_time, Some(10));
+            assert_eq!(local_params.spec.format.use_inband_fec, Some(true));
+        }
+
+        #[test]
+        fn test_opus_no_stereo_when_not_offered() {
+            let local_spec = opus_codec_spec(FormatParams {
+                min_p_time: Some(10),
+                use_inband_fec: Some(true),
+                ..Default::default()
+            });
+            let mut local_params =
+                PayloadParams::new(Pt::new_with_value(111), None, local_spec);
+
+            // Remote offers without stereo params
+            let remote_spec = opus_codec_spec(FormatParams::default());
+            let remote_params =
+                PayloadParams::new(Pt::new_with_value(111), None, remote_spec);
+
+            let mut claimed = [false; 128];
+            let mut unlocked = std::collections::HashSet::new();
+            local_params.update_param(&[remote_params], &mut claimed, false, &mut unlocked);
+
+            assert_eq!(
+                local_params.spec.format.stereo, None,
+                "stereo should remain None when remote doesn't offer sprop-stereo"
+            );
+            assert_eq!(
+                local_params.spec.format.max_playback_rate, None,
+                "maxplaybackrate should remain None when remote doesn't offer sprop-maxcapturerate"
             );
         }
     }
