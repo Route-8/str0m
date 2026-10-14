@@ -778,3 +778,20 @@ impl fmt::Debug for RtpPacket {
             .finish()
     }
 }
+
+/// Scale factor in [0.5..1.5) for an RTCP report interval (RFC 3550 6.3.1),
+/// so same-instant streams don't report in permanent lockstep.
+///
+/// Derived from (SSRC, report count) instead of an RNG draw so a stream's
+/// schedule is reproducible. The mix is the SplitMix64 finalizer with
+/// Stafford's Mix13 constants: <https://prng.di.unimi.it/splitmix64.c>,
+/// <https://zimbry.blogspot.com/2011/09/better-bit-mixing-improving-on.html>
+pub(crate) fn report_interval_jitter(ssrc: Ssrc, report_count: u64) -> f32 {
+    let mut x = (u64::from(*ssrc) << 32) ^ report_count;
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    // Top 24 bits: exactly f32's mantissa width, so [0..1) without bias.
+    0.5 + (x >> 40) as f32 / (1u64 << 24) as f32
+}

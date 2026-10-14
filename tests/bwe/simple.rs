@@ -75,6 +75,15 @@ pub fn bwe_cellular() -> Result<(), RtcError> {
         description: "Wait for mid",
         duration: Duration::from_secs(75),
     };
+
+    // Where the loss-capped estimate settles while sending only the low
+    // layer depends on RTCP report phase (jittered per RFC 3550 6.3.1).
+    // Require progress beyond the low layer; later checks want full rates.
+    plan[3] = Step::Check {
+        description: "Check progress toward mid",
+        at_least: Bitrate::kbps(400),
+    };
+
     // RTT-paced NACK retries can delay feedback after burst loss; let the
     // estimator reach the existing 1 Mbps checkpoint.
     plan[5] = Step::Run {

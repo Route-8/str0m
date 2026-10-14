@@ -27,6 +27,7 @@ use crate::util::value_history::ValueHistory;
 use crate::util::{InstantExt, already_happened, not_happening};
 
 use super::RtpPacket;
+use super::report_interval_jitter;
 use super::rtx_cache::RtxCache;
 use super::send_queue::SendQueue;
 use super::send_stats::StreamTxStats;
@@ -150,6 +151,9 @@ pub struct StreamTx {
 
     /// Last time we produced a SR.
     last_sender_report: Instant,
+
+    /// Number of SRs produced. Varies the next SR interval (RFC 3550 6.3.1).
+    sender_report_count: u64,
 
     /// If we have a pending incoming keyframe request.
     pending_request_keyframe: Option<KeyframeRequestKind>,
@@ -326,6 +330,7 @@ impl StreamTx {
             rtx_cache: RtxCache::new(2000, DEFAULT_RTX_CACHE_DURATION),
             rtx_ratio_cap: DEFAULT_RTX_RATIO_CAP,
             last_sender_report: already_happened(),
+            sender_report_count: 0,
             pending_request_keyframe: None,
             pending_request_remb: None,
             stats: StreamTxStats::new(enable_stats),
@@ -950,7 +955,9 @@ impl StreamTx {
             // First handle_timeout sets the kind. No sender report until then.
             return not_happening();
         }
-        self.last_sender_report + intervals.for_audio(self.is_audio())
+        let interval = intervals.for_audio(self.is_audio());
+        let jitter = report_interval_jitter(self.ssrc, self.sender_report_count);
+        self.last_sender_report + interval.mul_f32(jitter)
     }
 
     pub(crate) fn poll_keyframe_request(&mut self) -> Option<KeyframeRequestKind> {
@@ -1042,6 +1049,7 @@ impl StreamTx {
 
         // Update timestamp to move time when next is created.
         self.last_sender_report = now;
+        self.sender_report_count += 1;
     }
 
     fn create_sender_report(&self, now: Instant) -> SenderReport {
@@ -1501,18 +1509,25 @@ mod test {
     }
 
     #[test]
-    fn sender_report_uses_supplied_intervals() {
+    fn sender_report_uses_jittered_supplied_intervals() {
         let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), false, 1200);
         let now = Instant::now();
         stream.kind = Some(MediaKind::Audio);
-        stream.last_sender_report = now;
 
-        assert_eq!(
-            stream.sender_report_at(RtcpReportIntervals {
-                audio: Duration::from_millis(750),
-                video: Duration::from_millis(500),
-            }),
-            now + Duration::from_millis(750)
-        );
+        let intervals = RtcpReportIntervals {
+            audio: Duration::from_millis(800),
+            video: Duration::from_millis(100),
+        };
+
+        // The supplied audio interval, scaled by [0.5..1.5) per report.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..32 {
+            stream.create_sr_and_update(now, &mut VecDeque::new());
+            let at = stream.sender_report_at(intervals);
+            assert!(at >= now + Duration::from_millis(400));
+            assert!(at < now + Duration::from_millis(1200));
+            seen.insert(at);
+        }
+        assert!(seen.len() > 1, "consecutive report intervals never vary");
     }
 }
