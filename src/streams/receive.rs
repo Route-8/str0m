@@ -20,6 +20,7 @@ use crate::util::{already_happened, calculate_rtt};
 use super::RtpPacket;
 use super::StreamPaused;
 use super::register::ReceiverRegister;
+use super::report_interval_jitter;
 
 /// How many recent packets to remember for placing RED redundant blocks. Must cover the
 /// recovery depth plus some reordering slack.
@@ -99,6 +100,9 @@ pub struct StreamRx {
 
     /// Last time we produced regular feedback RR.
     last_receiver_report: Instant,
+
+    /// Number of RRs produced. Varies the next RR interval (RFC 3550 6.3.1).
+    receiver_report_count: u64,
 
     /// Statistics of incoming data.
     stats: StreamRxStats,
@@ -181,6 +185,7 @@ impl StreamRx {
             pending_request_remb: None,
             fir_seq_no: 0,
             last_receiver_report: already_happened(),
+            receiver_report_count: 0,
             stats: StreamRxStats::default(),
             check_paused_at: None,
             paused: true,
@@ -262,7 +267,9 @@ impl StreamRx {
     }
 
     pub(crate) fn receiver_report_at(&self, intervals: RtcpReportIntervals) -> Instant {
-        self.last_receiver_report + intervals.for_audio(self.is_audio())
+        let interval = intervals.for_audio(self.is_audio());
+        let jitter = report_interval_jitter(self.ssrc, self.receiver_report_count);
+        self.last_receiver_report + interval.mul_f32(jitter)
     }
 
     pub(crate) fn handle_rtcp(&mut self, now: Instant, fb: RtcpFb) {
@@ -740,6 +747,7 @@ impl StreamRx {
         feedback.push_back(Rtcp::ExtendedReport(xr));
 
         self.last_receiver_report = now;
+        self.receiver_report_count += 1;
     }
 
     fn create_receiver_report(&mut self, now: Instant) -> ReceiverReport {
@@ -1296,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-    fn receiver_report_uses_supplied_intervals() {
+    fn receiver_report_uses_jittered_supplied_intervals() {
         let mut stream = StreamRx::new(
             7.into(),
             MidRid("mid".into(), None),
@@ -1304,15 +1312,22 @@ mod tests {
             Duration::from_millis(1500),
         );
         let now = Instant::now();
-        stream.last_receiver_report = now;
 
-        assert_eq!(
-            stream.receiver_report_at(RtcpReportIntervals {
-                audio: Duration::from_millis(750),
-                video: Duration::from_millis(500),
-            }),
-            now + Duration::from_millis(750)
-        );
+        let intervals = RtcpReportIntervals {
+            audio: Duration::from_millis(800),
+            video: Duration::from_millis(100),
+        };
+
+        // The supplied audio interval, scaled by [0.5..1.5) per report.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..32 {
+            stream.create_rr_and_update(now, 1.into(), &mut VecDeque::new());
+            let at = stream.receiver_report_at(intervals);
+            assert!(at >= now + Duration::from_millis(400));
+            assert!(at < now + Duration::from_millis(1200));
+            seen.insert(at);
+        }
+        assert!(seen.len() > 1, "consecutive report intervals never vary");
     }
 
     #[test]

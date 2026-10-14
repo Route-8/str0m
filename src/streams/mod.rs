@@ -144,10 +144,6 @@ pub(crate) struct Streams {
     /// have any reasonable value to use.
     default_ssrc_tx: Ssrc,
 
-    /// We need to report all RR/SR for a Mid together in one RTCP. This is a dynamic
-    /// list that we don't want to allocate on every handle_timeout.
-    mids_to_report: Vec<Mid>,
-
     /// Whether periodic statistics reports are expected to be generated. This informs us on
     /// whether we should be holding onto data needed for those reports or not.
     enable_stats: bool,
@@ -181,7 +177,6 @@ impl Streams {
             probe_tx: StreamTx::new_probe(mtu_warn),
             probe_media: None,
             default_ssrc_tx: 0.into(), // this will be changed
-            mids_to_report: Vec::with_capacity(10),
             enable_stats,
             mtu_warn,
             pause_threshold,
@@ -437,19 +432,11 @@ impl Streams {
     ) {
         let StreamTimeoutConfig { codecs, intervals } = config;
 
-        self.mids_to_report.clear(); // Clear for checking StreamRx.
-        for stream in self.streams_rx.values() {
-            if stream.need_rr(now, intervals) {
-                self.mids_to_report.push(stream.mid());
-            }
-        }
-
         for stream in self.streams_rx.values_mut() {
             stream.maybe_create_keyframe_request(sender_ssrc, feedback);
             stream.maybe_create_remb_request(sender_ssrc, feedback);
 
-            // All StreamRx belonging to the same Mid are reported together.
-            if self.mids_to_report.contains(&stream.mid()) {
+            if stream.need_rr(now, intervals) {
                 stream.create_rr_and_update(now, sender_ssrc, feedback);
             }
 
@@ -460,18 +447,10 @@ impl Streams {
             stream.handle_timeout(now);
         }
 
-        self.mids_to_report.clear(); // start over for StreamTx.
-        for stream in self.streams_tx.values() {
-            if stream.need_sr(now, intervals) {
-                self.mids_to_report.push(stream.mid());
-            }
-        }
-
         for stream in self.streams_tx.values_mut() {
             let mid = stream.mid();
 
-            // All StreamTx belonging to the same Mid are reported together.
-            if self.mids_to_report.contains(&mid) {
+            if stream.need_sr(now, intervals) {
                 stream.create_sr_and_update(now, feedback);
             }
 
@@ -780,5 +759,167 @@ impl fmt::Debug for RtpPacket {
             .field("nackable", &self.nackable)
             .field("timestamp", &self.timestamp)
             .finish()
+    }
+}
+
+/// Scale factor in [0.5..1.5) for an RTCP report interval (RFC 3550 6.3.1),
+/// so same-instant streams don't report in permanent lockstep.
+///
+/// Derived from (SSRC, report count) instead of an RNG draw so a stream's
+/// schedule is reproducible. The mix is the SplitMix64 finalizer with
+/// Stafford's Mix13 constants: <https://prng.di.unimi.it/splitmix64.c>,
+/// <https://zimbry.blogspot.com/2011/09/better-bit-mixing-improving-on.html>
+pub(crate) fn report_interval_jitter(ssrc: Ssrc, report_count: u64) -> f32 {
+    let mut x = (u64::from(*ssrc) << 32) ^ report_count;
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    // Top 24 bits: exactly f32's mantissa width, so [0..1) without bias.
+    0.5 + (x >> 40) as f32 / (1u64 << 24) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::{Frequency, MediaKind};
+    use crate::rtp_::ExtensionMap;
+
+    #[test]
+    fn simulcast_receiver_reports_are_independent() {
+        assert_independent_reports(false);
+    }
+
+    #[test]
+    fn simulcast_sender_reports_are_independent() {
+        assert_independent_reports(true);
+    }
+
+    fn assert_independent_reports(sender: bool) {
+        let start = Instant::now();
+        let intervals = RtcpReportIntervals {
+            audio: Duration::from_secs(1),
+            video: Duration::from_secs(1),
+        };
+        let codecs = CodecConfig::default();
+        let media =
+            Media::from_direct_api("video".into(), 0, MediaKind::Video, ExtensionMap::empty());
+        let mut streams = Streams::new(false, 1200, Duration::from_millis(1500));
+
+        let add_layer = |streams: &mut Streams, ssrc: Ssrc, rid: &str, now: Instant| {
+            let midrid = MidRid(media.mid(), Some(rid.into()));
+            if sender {
+                let mut stream = StreamTx::new(ssrc, None, midrid, false, 1200);
+                stream.handle_timeout(now, || (&media, &codecs));
+                streams.streams_tx.insert(ssrc, stream);
+            } else {
+                let mut stream = StreamRx::new(ssrc, midrid, true, Duration::from_millis(1500));
+                let header = RtpHeader {
+                    ssrc,
+                    sequence_number: 1,
+                    ..Default::default()
+                };
+                let seq_no = stream.extend_seq(&header, false, |_| None);
+                stream.update_register(now, &header, Frequency::NINETY_KHZ, false, seq_no);
+                streams.streams_rx.insert(ssrc, stream);
+            }
+        };
+        let deadlines = |streams: &Streams| -> HashMap<Ssrc, Instant> {
+            if sender {
+                streams
+                    .streams_tx
+                    .values()
+                    .map(|s| (s.ssrc(), s.sender_report_at(intervals)))
+                    .collect()
+            } else {
+                streams
+                    .streams_rx
+                    .values()
+                    .map(|s| (s.ssrc(), s.receiver_report_at(intervals)))
+                    .collect()
+            }
+        };
+        let report = |streams: &mut Streams, now: Instant| -> Vec<Ssrc> {
+            let mut feedback = VecDeque::new();
+            streams.handle_timeout(
+                now,
+                100.into(),
+                false,
+                std::slice::from_ref(&media),
+                StreamTimeoutConfig {
+                    codecs: &codecs,
+                    intervals,
+                },
+                &mut feedback,
+            );
+            let mut reported = Vec::new();
+            for packet in feedback {
+                match packet {
+                    Rtcp::SenderReport(sr) => reported.push(sr.sender_info.ssrc),
+                    Rtcp::ReceiverReport(rr) => {
+                        reported.extend(rr.reports.iter().map(|r| r.ssrc));
+                    }
+                    _ => {}
+                }
+            }
+            reported.sort();
+            reported
+        };
+
+        let ssrcs = [7.into(), 42.into(), 1234.into()];
+        for (ssrc, rid) in ssrcs.into_iter().zip(["l", "m", "h"]) {
+            add_layer(&mut streams, ssrc, rid, start);
+        }
+        assert_eq!(report(&mut streams, start), ssrcs);
+        let mut samples: HashMap<_, _> = ssrcs
+            .into_iter()
+            .map(|ssrc| (ssrc, (start, Duration::ZERO, 0u32)))
+            .collect();
+
+        for cycle in 0..4000 {
+            let before = deadlines(&streams);
+            let now = streams.regular_feedback_at(intervals).unwrap();
+            let mut due: Vec<_> = before
+                .iter()
+                .filter_map(|(&ssrc, &at)| (at == now).then_some(ssrc))
+                .collect();
+            due.sort();
+            assert_eq!(report(&mut streams, now), due, "reported a layer early");
+            let after = deadlines(&streams);
+            for (ssrc, at) in before {
+                if at > now {
+                    assert_eq!(after[&ssrc], at, "advanced an unreported layer's timer");
+                } else {
+                    let (last, total, count) = samples.get_mut(&ssrc).unwrap();
+                    *total += now - *last;
+                    *last = now;
+                    *count += 1;
+                    assert!(after[&ssrc] >= now + Duration::from_millis(500));
+                    assert!(after[&ssrc] < now + Duration::from_millis(1500));
+                }
+            }
+
+            // A newly discovered layer is immediately due, but must not pull the
+            // established layers forward or reset their report schedules.
+            if cycle == 20 {
+                let ssrc = 5678.into();
+                add_layer(&mut streams, ssrc, "new", now);
+                assert_eq!(report(&mut streams, now), vec![ssrc]);
+                let with_new_layer = deadlines(&streams);
+                for (ssrc, at) in after {
+                    assert_eq!(with_new_layer[&ssrc], at);
+                }
+                samples.insert(ssrc, (now, Duration::ZERO, 0));
+            }
+        }
+
+        for (ssrc, (_, total, count)) in samples {
+            assert!(count > 900, "too few reports for {ssrc:?}: {count}");
+            let mean = total.as_secs_f64() / f64::from(count);
+            assert!(
+                (mean - 1.0).abs() < 0.05,
+                "biased interval for {ssrc:?}: {mean}"
+            );
+        }
     }
 }

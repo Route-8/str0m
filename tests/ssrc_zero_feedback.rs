@@ -32,16 +32,24 @@ fn receiver(ssrc: u32, now: Instant) -> Rtc {
 fn ordinary_receiver_advances_feedback_deadline() {
     let now = Instant::now();
     let mut rtc = receiver(1234, now);
-    let expected = now + Duration::from_secs(1);
+    // The 1 s report interval is jittered by [0.5..1.5) (RFC 3550 6.3.1).
+    let min_expected = now + Duration::from_millis(500);
+    let max_expected = now + Duration::from_millis(1500);
     let mut timeout = now;
     for _ in 0..32 {
         rtc.handle_input(Input::Timeout(timeout)).unwrap();
         let (deadline, reason) = next_timeout(&mut rtc);
         if reason == Reason::Feedback {
-            assert_eq!(deadline, expected);
+            assert!(deadline >= min_expected, "feedback deadline too early");
+            assert!(deadline < max_expected, "feedback deadline too late");
             return;
         }
-        assert!(deadline <= expected, "feedback was not the next deadline");
+        // Deadlines come earliest-first: walking past the latest possible
+        // feedback time without Reason::Feedback means none is scheduled.
+        assert!(
+            deadline < max_expected,
+            "no feedback deadline within the report interval window"
+        );
         timeout = deadline;
     }
     panic!("ordinary receiver did not schedule feedback within 32 timeouts");
